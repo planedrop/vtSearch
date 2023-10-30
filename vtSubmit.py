@@ -1,176 +1,66 @@
-#!/usr/bin/env python
-
-import sys
+# Import modules
 import os
-import optparse
-import urllib2
-import time
-import zipfile
+import csv
+import random
+import requests
+import json
 
-try:
-    import poster
-except:
-    print('Module poster missing: https://pypi.python.org/pypi/poster')
-    exit()
+# Generate random 3 digit number for filename
+random_num = str(random.randint(100,999)) 
 
-try:
-    import json
-    jsonalias = json
-except:
+# Get API key from user input
+api_key = input("Enter your VirusTotal API key: ")
+
+# Get folder path from user input
+folder_path = input("Enter folder path: ")
+
+# Output CSV filename 
+output_file = 'vt_results_' + random_num + '.csv'
+
+# Open CSV file for writing
+with open(output_file, 'w', newline='') as csvfile:
+  
+  # Create CSV writer
+  writer = csv.writer(csvfile)
+
+  # Write header row  
+  writer.writerow(['Filename', 'Scan URL'])
+
+  # Iterate through files in folder
+  for filename in os.listdir(folder_path):
+
+    # Construct full file path 
+    file_path = os.path.join(folder_path, filename)
+
     try:
-        import simplejson
-        jsonalias = simplejson
-    except:
-        print('Modules json and simplejson missing')
-        exit()
+      # Open file in binary mode
+      with open(file_path, 'rb') as f:
 
-apiKey = ''
+        # Construct payload with file contents
+        files = {'file': (filename, f)}
 
-vtScanURL = 'https://www.virustotal.com/vtapi/v2/file/scan'
+        # Make API request
+        response = requests.post(
+          'https://www.virustotal.com/vtapi/v2/file/scan',
+          files=files,
+          headers={'API-Key': api_key}
+        )
 
-def Timestamp(epoch=None):
-    if epoch == None:
-        localTime = time.localtime()
-    else:
-        localTime = time.localtime(epoch)
-    return '%04d%02d%02d-%02d%02d%02d' % localTime[0:6]
+        # Check response status code
+        if response.status_code == 200:
+          
+          # Extract scan URL 
+          url = response.json()['permalink']
+          
+          # Write row to CSV
+          writer.writerow([filename, url])
 
-class CSVLogger():
-    def __init__(self, prefix, headers, separator=';'):
-        self.separator = separator
-        self.filename = '%s-%s.csv' % (prefix, Timestamp())
-        self.f = open(self.filename, 'w')
-        self.f.write(self.separator.join(headers) + '\n')
-        self.f.close()
-
-    def PrintAndLog(self, formats, parameters):
-        line = self.separator.join(formats) % parameters
-        print(line)
-        f = open(self.filename, 'a')
-        f.write(line + '\n')
-        f.close()
-
-def VTHTTPScanRequest(filename, options):
-    if filename.lower().endswith('.zip') and not options.zip:
-        oZipfile = None
-        file = None
-        try:
-            oZipfile = zipfile.ZipFile(filename, 'r')
-            file = oZipfile.open(oZipfile.infolist()[0], 'r', 'infected')
-            data = file.read()
-            postfilename = oZipfile.infolist()[0].filename
-        except:
-            return None, sys.exc_info()[1]
-        finally:
-            if file:
-                file.close()
-            if oZipfile:
-                oZipfile.close()
-    else:
-        file = None
-        try:
-            file = open(filename, 'rb')
-            data = file.read()
-            postfilename = filename
-        except IOError as e:
-            return None, str(e)
-        finally:
-            if file:
-                file.close()
-    params = []
-    params.append(poster.encode.MultipartParam('apikey', apiKey))
-    params.append(poster.encode.MultipartParam('file', value=data, filename=os.path.basename(postfilename)))
-    datagen, headers = poster.encode.multipart_encode(params)
-    req = urllib2.Request(vtScanURL, datagen, headers)
-    try:
-        if sys.hexversion >= 0x020601F0:
-            hRequest = urllib2.urlopen(req, timeout=15)
         else:
-            hRequest = urllib2.urlopen(req)
-    except urllib2.HTTPError as e:
-        return None, str(e)
-    try:
-        data = hRequest.read()
-    except:
-        return None, 'Error'
-    finally:
-        hRequest.close()
-    return data, None
+          print(f'Error uploading {filename}')
 
-def File2Strings(filename):
-    try:
-        f = open(filename, 'r')
-    except:
-        return None
-    try:
-        return map(lambda line:line.rstrip('\n'), f.readlines())
-    except:
-        return None
-    finally:
-        f.close()
+    # Ignore directories    
+    except IsADirectoryError:
+      print(f'{filename} is a directory, skipping...')
 
-
-def VirusTotalSubmit(filenames, options):
-    global oLogger
-
-    poster.streaminghttp.register_openers()
-
-    headers = ('Filename', 'Response', 'Message', 'md5', 'sha256', 'Scan ID', 'Permalink')
-    oLogger = CSVLogger('virustotal-submit', headers)
-    while filenames != []:
-        filename = filenames[0]
-        filenames = filenames[1:]
-        jsonResponse, error = VTHTTPScanRequest(filename, options)
-        if jsonResponse == None:
-            formats = ('%s', '%s')
-            parameters = (filename, error)
-            oLogger.PrintAndLog(formats, parameters)
-        else:
-            oResult = jsonalias.loads(jsonResponse)
-            if oResult['response_code'] == 1:
-                formats = ('%s', '%d', '%s', '%s', '%s', '%s', '%s')
-                parameters = (filename, oResult['response_code'], oResult['verbose_msg'], oResult['md5'], oResult['sha256'], oResult['scan_id'], oResult['permalink'])
-            else:
-                formats = ('%s', '%d', '%s')
-                parameters = (filename, oResult['response_code'], oResult['verbose_msg'])
-            oLogger.PrintAndLog(formats, parameters)
-        if filenames != []:
-            time.sleep(options.delay)
-
-def Main():
-    global apiKey
-
-    oParser = optparse.OptionParser(usage='usage: %prog [options] file\n', version='%prog ')
-    oParser.add_option('-d', '--delay', type=int, default=16, help='delay in seconds between queries (default 16s, VT rate limit is 4 queries per minute)')
-    oParser.add_option('-k', '--key', default='', help='VirusTotal API key')
-    oParser.add_option('-f', '--file', help='File contains filenames to submit')
-    oParser.add_option('-z', '--zip', action='store_true', default=False, help='Submit the ZIP file, not the content of the ZIP file')
-    (options, args) = oParser.parse_args()
-
-    if not options.file and len(args) == 0:
-        oParser.print_help()
-        print('')
-        return
-    if os.getenv('apiKey') != None:
-        apiKey = os.getenv('apiKey')
-    if options.key != '':
-        apiKey = options.key
-    if apiKey == '':
-        print('You need to get a VirusTotal API key and set environment variable apiKey, use option -k or add it to this program.\nTo get your API key, you need a VirusTotal account.')
-    elif options.file:
-        VirusTotalSubmit(File2Strings(options.file), options)
-    else:
-        VirusTotalSubmit(args, options)
-
-if __name__ == '__main__':
-    Main()
-
-
-
-"""
-Run the script
-python vtSubmit.py sample.exe
-python vtSubmit.py -f sample.txt
-python vtSubmit.py -z sample.zip
-python vtSubmit.py -d <int> sample.txt
-"""
+# Print output filename       
+print(f'Results written to {output_file}')
